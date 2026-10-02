@@ -12,15 +12,15 @@ jobs:
     runs-on: macos-15
 
     steps:
-      # ---------------------------------------------------------
-      # 1. Checkout
-      # ---------------------------------------------------------
-      - name: Checkout repository
+      # -----------------------------
+      # Checkout
+      # -----------------------------
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------------------------------------------------------
-      # 2. Find test.zip
-      # ---------------------------------------------------------
+      # -----------------------------
+      # Find test.zip
+      # -----------------------------
       - name: Find test.zip
         shell: bash
         run: |
@@ -28,7 +28,7 @@ jobs:
 
           ZIP="$(find "$GITHUB_WORKSPACE" \
             -type f \
-            -iname "test.zip" \
+            -name "test.zip" \
             -print -quit)"
 
           if [ -z "$ZIP" ]; then
@@ -36,14 +36,14 @@ jobs:
             exit 1
           fi
 
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+
           echo "Found:"
           echo "$ZIP"
 
-          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
-
-      # ---------------------------------------------------------
-      # 3. Extract test.zip
-      # ---------------------------------------------------------
+      # -----------------------------
+      # Extract
+      # -----------------------------
       - name: Extract test.zip
         shell: bash
         run: |
@@ -54,61 +54,79 @@ jobs:
 
           unzip -oq "$ZIP" -d extracted
 
-          echo "===== Extracted files ====="
+          echo "===== Contents ====="
           find extracted -maxdepth 10 -print
 
-      # ---------------------------------------------------------
-      # 4. Extract nested ZIP files
-      # ---------------------------------------------------------
-      - name: Extract nested ZIP files
+      # -----------------------------
+      # Install XcodeGen
+      # -----------------------------
+      - name: Install XcodeGen
         shell: bash
         run: |
           set -e
 
-          for ROUND in 1 2 3 4 5; do
-            FOUND=0
+          brew install xcodegen
 
-            while IFS= read -r -d '' FILE; do
-              FOUND=1
+          xcodegen --version
 
-              echo "Extracting nested archive:"
-              echo "$FILE"
-
-              DEST="${FILE%.zip}_extracted"
-              mkdir -p "$DEST"
-
-              unzip -oq "$FILE" -d "$DEST"
-              rm -f "$FILE"
-
-            done < <(
-              find extracted \
-                -type f \
-                \( -iname "*.zip" -o -iname "*.ZIP" \) \
-                -print0
-            )
-
-            if [ "$FOUND" -eq 0 ]; then
-              break
-            fi
-          done
-
-          echo "===== Final extracted tree ====="
-          find extracted -maxdepth 15 -print
-
-      # ---------------------------------------------------------
-      # 5. Find Xcode project/workspace
-      # ---------------------------------------------------------
-      - name: Find Xcode project
+      # -----------------------------
+      # Find project.yml
+      # -----------------------------
+      - name: Find XcodeGen project
         shell: bash
         run: |
           set -e
 
-          PROJECT="$(find extracted \
+          PROJECT_YML="$(find extracted \
+            -type f \
+            -name "project.yml" \
+            -print -quit)"
+
+          if [ -z "$PROJECT_YML" ]; then
+            echo "::error::No project.yml found."
+            find extracted -maxdepth 15 -print
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$PROJECT_YML")"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Found XcodeGen project:"
+          echo "$PROJECT_YML"
+
+      # -----------------------------
+      # Generate .xcodeproj
+      # -----------------------------
+      - name: Generate Xcode project
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "Generating Xcode project..."
+
+          xcodegen generate
+
+          echo ""
+          echo "===== Generated files ====="
+          find . -maxdepth 2 -print
+
+      # -----------------------------
+      # Find generated project
+      # -----------------------------
+      - name: Find generated Xcode project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT="$(find "$PROJECT_DIR" \
             -type d \
             -name "*.xcodeproj" \
             -print -quit)"
 
-          WORKSPACE="$(find extracted \
+          WORKSPACE="$(find "$PROJECT_DIR" \
             -type d \
             -name "*.xcworkspace" \
             -print -quit)"
@@ -117,38 +135,25 @@ jobs:
             echo "TYPE=workspace" >> "$GITHUB_ENV"
             echo "XCODE_PATH=$WORKSPACE" >> "$GITHUB_ENV"
 
-            echo "================================"
-            echo "Found Xcode workspace:"
+            echo "Using workspace:"
             echo "$WORKSPACE"
-            echo "================================"
 
           elif [ -n "$PROJECT" ]; then
             echo "TYPE=project" >> "$GITHUB_ENV"
-            echo "XCODE_PATH=$PROJECT" >> "$GITHUB_ENV"
+            echo "XCODE_PATH=$PROJECT"
 
-            echo "================================"
-            echo "Found Xcode project:"
+            echo "Using project:"
             echo "$PROJECT"
-            echo "================================"
 
           else
-            echo "::error::No .xcodeproj or .xcworkspace was found inside test.zip."
-
-            echo ""
-            echo "===== Everything extracted ====="
-            find extracted -maxdepth 20 -print
-
-            echo ""
-            echo "If this contains an IPA, APP, source folder, or another archive,"
-            echo "it cannot be built with xcodebuild until an Xcode project/workspace exists."
-
+            echo "::error::XcodeGen did not create an Xcode project."
             exit 1
           fi
 
-      # ---------------------------------------------------------
-      # 6. List schemes
-      # ---------------------------------------------------------
-      - name: List Xcode schemes
+      # -----------------------------
+      # List schemes
+      # -----------------------------
+      - name: List schemes
         shell: bash
         run: |
           set -e
@@ -165,10 +170,10 @@ jobs:
               | tee xcode-list.txt
           fi
 
-      # ---------------------------------------------------------
-      # 7. Select scheme
-      # ---------------------------------------------------------
-      - name: Select scheme
+      # -----------------------------
+      # Determine scheme
+      # -----------------------------
+      - name: Determine scheme
         shell: bash
         run: |
           set -e
@@ -189,10 +194,8 @@ jobs:
           )"
 
           if [ -z "$SCHEME" ]; then
-            echo "::error::No Xcode scheme was found."
+            echo "::error::No scheme found."
 
-            echo ""
-            echo "===== xcodebuild -list output ====="
             cat xcode-list.txt
 
             exit 1
@@ -200,12 +203,12 @@ jobs:
 
           echo "SCHEME=$SCHEME" >> "$GITHUB_ENV"
 
-          echo "Selected scheme:"
+          echo "Using scheme:"
           echo "$SCHEME"
 
-      # ---------------------------------------------------------
-      # 8. Build unsigned .app
-      # ---------------------------------------------------------
+      # -----------------------------
+      # Build unsigned app
+      # -----------------------------
       - name: Build unsigned app
         shell: bash
         run: |
@@ -238,9 +241,9 @@ jobs:
 
           fi
 
-      # ---------------------------------------------------------
-      # 9. Find generated .app
-      # ---------------------------------------------------------
+      # -----------------------------
+      # Find .app
+      # -----------------------------
       - name: Find built app
         shell: bash
         run: |
@@ -255,10 +258,8 @@ jobs:
           )"
 
           if [ -z "$APP" ]; then
-            echo "::error::The Xcode build completed but no .app was found."
+            echo "::error::No .app was produced."
 
-            echo ""
-            echo "===== Build products ====="
             find build -maxdepth 10 -print
 
             exit 1
@@ -266,14 +267,12 @@ jobs:
 
           echo "APP=$APP" >> "$GITHUB_ENV"
 
-          echo "================================"
-          echo "Built app:"
+          echo "Built:"
           echo "$APP"
-          echo "================================"
 
-      # ---------------------------------------------------------
-      # 10. Create IPA
-      # ---------------------------------------------------------
+      # -----------------------------
+      # Create IPA
+      # -----------------------------
       - name: Create unsigned IPA
         shell: bash
         run: |
@@ -292,25 +291,23 @@ jobs:
 
           cd "$GITHUB_WORKSPACE"
 
-          echo "================================"
-          echo "IPA created:"
+          echo "===== IPA ====="
           ls -lh unsigned.ipa
-          echo "================================"
 
-      # ---------------------------------------------------------
-      # 11. Upload IPA
-      # ---------------------------------------------------------
-      - name: Upload unsigned IPA
+      # -----------------------------
+      # Upload IPA
+      # -----------------------------
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: unsigned-ipa
           path: unsigned.ipa
           if-no-files-found: error
 
-      # ---------------------------------------------------------
-      # 12. Upload build logs if something goes wrong
-      # ---------------------------------------------------------
-      - name: Upload build diagnostics
+      # -----------------------------
+      # Upload diagnostics if failed
+      # -----------------------------
+      - name: Upload diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
