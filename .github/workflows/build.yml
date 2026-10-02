@@ -17,7 +17,7 @@ jobs:
       # CHECKOUT
       # ==========================================
 
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
 
@@ -30,20 +30,20 @@ jobs:
         run: |
           set -e
 
-          ZIP=$(find "$GITHUB_WORKSPACE" \
+          ZIP="$(find "$GITHUB_WORKSPACE" \
             -type f \
             -name "test.zip" \
-            -print -quit)
+            -print -quit)"
 
           if [ -z "$ZIP" ]; then
             echo "::error::test.zip was not found."
             exit 1
           fi
 
-          echo "Found test.zip:"
-          echo "$ZIP"
-
           echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+
+          echo "Found:"
+          echo "$ZIP"
 
 
       # ==========================================
@@ -56,17 +56,15 @@ jobs:
           set -e
 
           rm -rf "$GITHUB_WORKSPACE/extracted"
-
           mkdir -p "$GITHUB_WORKSPACE/extracted"
 
-          unzip -oq \
-            "$ZIP" \
+          unzip -oq "$ZIP" \
             -d "$GITHUB_WORKSPACE/extracted"
 
-          echo "===== ZIP CONTENTS ====="
+          echo "===== EXTRACTED FILES ====="
 
           find "$GITHUB_WORKSPACE/extracted" \
-            -maxdepth 10 \
+            -maxdepth 15 \
             -print
 
 
@@ -81,7 +79,7 @@ jobs:
 
           brew install xcodegen
 
-          echo "XcodeGen:"
+          echo "XcodeGen version:"
           xcodegen --version
 
 
@@ -94,10 +92,10 @@ jobs:
         run: |
           set -e
 
-          PROJECT_YML=$(find "$GITHUB_WORKSPACE/extracted" \
+          PROJECT_YML="$(find "$GITHUB_WORKSPACE/extracted" \
             -type f \
             -name "project.yml" \
-            -print -quit)
+            -print -quit)"
 
           if [ -z "$PROJECT_YML" ]; then
             echo "::error::project.yml was not found."
@@ -109,12 +107,11 @@ jobs:
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$PROJECT_YML")
+          PROJECT_DIR="$(dirname "$PROJECT_YML")"
 
-          echo "PROJECT_YML=$PROJECT_YML" >> "$GITHUB_ENV"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Found:"
+          echo "Found project.yml:"
           echo "$PROJECT_YML"
 
 
@@ -129,43 +126,41 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          echo "Running XcodeGen..."
-
           xcodegen generate
 
           echo ""
-          echo "===== GENERATED PROJECT ====="
+          echo "===== GENERATED FILES ====="
 
           find "$PROJECT_DIR" \
-            -maxdepth 3 \
+            -maxdepth 4 \
             -print
 
 
       # ==========================================
-      # FIND GENERATED PROJECT
+      # FIND XCODE PROJECT
       # ==========================================
 
-      - name: Find generated Xcode project
+      - name: Find Xcode project
         shell: bash
         run: |
           set -e
 
-          PROJECT=$(find "$PROJECT_DIR" \
+          PROJECT="$(find "$PROJECT_DIR" \
             -type d \
             -name "*.xcodeproj" \
-            -print -quit)
+            -print -quit)"
 
-          WORKSPACE=$(find "$PROJECT_DIR" \
+          WORKSPACE="$(find "$PROJECT_DIR" \
             -type d \
             -name "*.xcworkspace" \
-            -print -quit)
+            -print -quit)"
 
           if [ -n "$WORKSPACE" ]; then
 
             echo "BUILD_TYPE=workspace" >> "$GITHUB_ENV"
             echo "XCODE_PATH=$WORKSPACE" >> "$GITHUB_ENV"
 
-            echo "Using workspace:"
+            echo "Using:"
             echo "$WORKSPACE"
 
           elif [ -n "$PROJECT" ]; then
@@ -173,23 +168,22 @@ jobs:
             echo "BUILD_TYPE=project" >> "$GITHUB_ENV"
             echo "XCODE_PATH=$PROJECT" >> "$GITHUB_ENV"
 
-            echo "Using project:"
+            echo "Using:"
             echo "$PROJECT"
 
           else
 
-            echo "::error::XcodeGen did not create an Xcode project."
-
+            echo "::error::No Xcode project was generated."
             exit 1
 
           fi
 
 
       # ==========================================
-      # SHOW SCHEMES
+      # LIST SCHEMES
       # ==========================================
 
-      - name: Show Xcode schemes
+      - name: List schemes
         shell: bash
         run: |
           set -e
@@ -212,7 +206,7 @@ jobs:
 
 
       # ==========================================
-      # GET SCHEME
+      # DETERMINE SCHEME
       # ==========================================
 
       - name: Determine scheme
@@ -220,7 +214,7 @@ jobs:
         run: |
           set -e
 
-          SCHEME=$(
+          SCHEME="$(
             awk '
               /Schemes:/ {
                 found=1
@@ -233,21 +227,17 @@ jobs:
                 exit
               }
             ' "$GITHUB_WORKSPACE/xcode-list.txt"
-          )
+          )"
 
           if [ -z "$SCHEME" ]; then
-
             echo "::error::No Xcode scheme found."
-
             cat "$GITHUB_WORKSPACE/xcode-list.txt"
-
             exit 1
-
           fi
 
           echo "SCHEME=$SCHEME" >> "$GITHUB_ENV"
 
-          echo "Using scheme:"
+          echo "Scheme:"
           echo "$SCHEME"
 
 
@@ -255,7 +245,7 @@ jobs:
       # BUILD
       # ==========================================
 
-      - name: Build iOS app
+      - name: Build app
         shell: bash
         run: |
           set -e
@@ -264,31 +254,28 @@ jobs:
 
           DERIVED_DATA="$GITHUB_WORKSPACE/build"
 
+          BUILD_ARGS=(
+            -scheme "$SCHEME"
+            -configuration Release
+            -sdk iphoneos
+            -destination "generic/platform=iOS"
+            -derivedDataPath "$DERIVED_DATA"
+            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_REQUIRED=NO
+            CODE_SIGN_IDENTITY=""
+          )
+
           if [ "$BUILD_TYPE" = "workspace" ]; then
 
             xcodebuild \
               -workspace "$XCODE_PATH" \
-              -scheme "$SCHEME" \
-              -configuration Release \
-              -sdk iphoneos \
-              -destination "generic/platform=iOS" \
-              -derivedDataPath "$DERIVED_DATA" \
-              CODE_SIGNING_ALLOWED=NO \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGN_IDENTITY=""
+              "${BUILD_ARGS[@]}"
 
           else
 
             xcodebuild \
               -project "$XCODE_PATH" \
-              -scheme "$SCHEME" \
-              -configuration Release \
-              -sdk iphoneos \
-              -destination "generic/platform=iOS" \
-              -derivedDataPath "$DERIVED_DATA" \
-              CODE_SIGNING_ALLOWED=NO \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGN_IDENTITY=""
+              "${BUILD_ARGS[@]}"
 
           fi
 
@@ -302,89 +289,115 @@ jobs:
         run: |
           set -e
 
-          echo "Searching for .app..."
-
-          APP=$(find "$GITHUB_WORKSPACE/build" \
-            -type d \
-            -name "*.app" \
-            -path "*Release-iphoneos*" \
-            -print -quit)
+          APP="$(
+            find "$GITHUB_WORKSPACE/build" \
+              -type d \
+              -name "*.app" \
+              -path "*Release-iphoneos*" \
+              -print -quit
+          )"
 
           if [ -z "$APP" ]; then
-
-            echo "::error::No .app was found."
-
-            echo ""
-            echo "===== BUILD DIRECTORY ====="
+            echo "::error::No .app was produced."
 
             find "$GITHUB_WORKSPACE/build" \
               -maxdepth 12 \
               -print
 
             exit 1
-
           fi
+
+          echo "APP=$APP" >> "$GITHUB_ENV"
 
           echo "Found app:"
           echo "$APP"
 
-          echo "APP=$APP" >> "$GITHUB_ENV"
-
 
       # ==========================================
-      # CREATE IPA
+      # CREATE PAYLOAD
       # ==========================================
 
-      - name: Create unsigned IPA
+      - name: Prepare IPA
         shell: bash
         run: |
           set -e
 
-          IPA="$GITHUB_WORKSPACE/unsigned.ipa"
-          PAYLOAD="$GITHUB_WORKSPACE/Payload"
+          rm -rf "$GITHUB_WORKSPACE/ipa-work"
+          rm -f "$GITHUB_WORKSPACE/unsigned.ipa"
 
-          rm -rf "$PAYLOAD"
-          rm -f "$IPA"
+          mkdir -p "$GITHUB_WORKSPACE/ipa-work/Payload"
 
-          mkdir -p "$PAYLOAD"
+          echo "Copying:"
+          echo "$APP"
 
-          echo "Copying app..."
-
-          cp -R "$APP" "$PAYLOAD/"
-
-          echo ""
-          echo "Payload contents:"
-
-          find "$PAYLOAD" -maxdepth 2 -print
+          cp -R "$APP" \
+            "$GITHUB_WORKSPACE/ipa-work/Payload/"
 
           echo ""
-          echo "Creating IPA..."
+          echo "Payload:"
+          find "$GITHUB_WORKSPACE/ipa-work/Payload" \
+            -maxdepth 3 \
+            -print
 
-          cd "$GITHUB_WORKSPACE"
 
-          /usr/bin/zip \
-            -qry \
-            "$IPA" \
-            Payload
+      # ==========================================
+      # CREATE IPA USING PYTHON
+      # ==========================================
+
+      - name: Create IPA
+        shell: bash
+        run: |
+          set -e
+
+          export IPA_PATH="$GITHUB_WORKSPACE/unsigned.ipa"
+          export PAYLOAD_PATH="$GITHUB_WORKSPACE/ipa-work/Payload"
+
+          python3 <<'PY'
+          import os
+          import zipfile
+
+          ipa = os.environ["IPA_PATH"]
+          payload = os.environ["PAYLOAD_PATH"]
+
+          print("Creating:")
+          print(ipa)
+
+          with zipfile.ZipFile(
+              ipa,
+              "w",
+              compression=zipfile.ZIP_DEFLATED
+          ) as z:
+
+              for root, dirs, files in os.walk(payload):
+                  for filename in files:
+                      full_path = os.path.join(root, filename)
+
+                      relative_path = os.path.relpath(
+                          full_path,
+                          os.path.dirname(payload)
+                      )
+
+                      z.write(
+                          full_path,
+                          relative_path
+                      )
+
+          print("IPA created.")
+
+          if not os.path.isfile(ipa):
+              raise SystemExit("IPA was not created.")
+
+          size = os.path.getsize(ipa)
+
+          print(f"IPA size: {size:,} bytes")
+
+          if size == 0:
+              raise SystemExit("IPA is empty.")
+          PY
 
           echo ""
-          echo "Checking IPA..."
-
-          if [ ! -f "$IPA" ]; then
-            echo "::error::IPA was not created!"
-            exit 1
-          fi
-
-          echo ""
-          echo "================================"
-          echo "SUCCESS"
-          echo "================================"
-
-          ls -lh "$IPA"
-
-          echo ""
-          echo "IPA:"
-          echo "$IPA"
+          echo "===== IPA CREATED ====="
+          ls -lh "$GITHUB_WORKSPACE/unsigned.ipa"
 
 
       # ==========================================
@@ -396,25 +409,34 @@ jobs:
         run: |
           set -e
 
-          if [ ! -f "$GITHUB_WORKSPACE/unsigned.ipa" ]; then
+          IPA="$GITHUB_WORKSPACE/unsigned.ipa"
+
+          if [ ! -f "$IPA" ]; then
             echo "::error::unsigned.ipa does not exist."
             exit 1
           fi
 
-          echo "IPA size:"
-          du -h "$GITHUB_WORKSPACE/unsigned.ipa"
+          echo "IPA exists:"
+          ls -lh "$IPA"
 
           echo ""
           echo "IPA contents:"
 
-          unzip -l "$GITHUB_WORKSPACE/unsigned.ipa"
+          unzip -l "$IPA"
+
+          echo ""
+          echo "Checking Payload..."
+
+          unzip -l "$IPA" | grep "Payload/.*\.app/" >/dev/null
+
+          echo "✅ IPA verification passed."
 
 
       # ==========================================
       # UPLOAD IPA
       # ==========================================
 
-      - name: Upload IPA
+      - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
           name: unsigned-ipa
@@ -423,7 +445,7 @@ jobs:
 
 
       # ==========================================
-      # UPLOAD DIAGNOSTICS IF BUILD FAILS
+      # DIAGNOSTICS
       # ==========================================
 
       - name: Upload diagnostics
@@ -434,4 +456,5 @@ jobs:
           path: |
             xcode-list.txt
             build/
+            ipa-work/
           if-no-files-found: ignore
