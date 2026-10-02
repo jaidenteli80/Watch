@@ -1,4 +1,4 @@
-name: Build IPA from test.zip
+name: Build Unsigned IPA
 
 on:
   workflow_dispatch:
@@ -12,137 +12,310 @@ jobs:
     runs-on: macos-15
 
     steps:
+      # ---------------------------------------------------------
+      # 1. Checkout
+      # ---------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ---------------------------------------------------------
+      # 2. Find test.zip
+      # ---------------------------------------------------------
       - name: Find test.zip
+        shell: bash
         run: |
-          ZIP=$(find . -type f -name "test.zip" | head -n 1)
+          set -e
+
+          ZIP="$(find "$GITHUB_WORKSPACE" \
+            -type f \
+            -iname "test.zip" \
+            -print -quit)"
 
           if [ -z "$ZIP" ]; then
-            echo "❌ test.zip not found!"
+            echo "::error::test.zip was not found."
             exit 1
           fi
 
+          echo "Found:"
+          echo "$ZIP"
+
           echo "ZIP=$ZIP" >> "$GITHUB_ENV"
-          echo "Found: $ZIP"
 
+      # ---------------------------------------------------------
+      # 3. Extract test.zip
+      # ---------------------------------------------------------
       - name: Extract test.zip
+        shell: bash
         run: |
+          set -e
+
           rm -rf extracted
-          mkdir extracted
-          unzip -q "$ZIP" -d extracted
+          mkdir -p extracted
 
-          echo "Extracted files:"
-          find extracted -maxdepth 3 -print
+          unzip -oq "$ZIP" -d extracted
 
-      - name: Find Xcode project
+          echo "===== Extracted files ====="
+          find extracted -maxdepth 10 -print
+
+      # ---------------------------------------------------------
+      # 4. Extract nested ZIP files
+      # ---------------------------------------------------------
+      - name: Extract nested ZIP files
+        shell: bash
         run: |
-          PROJECT=$(find extracted -type d -name "*.xcodeproj" | head -n 1)
-          WORKSPACE=$(find extracted -type d -name "*.xcworkspace" | head -n 1)
+          set -e
+
+          for ROUND in 1 2 3 4 5; do
+            FOUND=0
+
+            while IFS= read -r -d '' FILE; do
+              FOUND=1
+
+              echo "Extracting nested archive:"
+              echo "$FILE"
+
+              DEST="${FILE%.zip}_extracted"
+              mkdir -p "$DEST"
+
+              unzip -oq "$FILE" -d "$DEST"
+              rm -f "$FILE"
+
+            done < <(
+              find extracted \
+                -type f \
+                \( -iname "*.zip" -o -iname "*.ZIP" \) \
+                -print0
+            )
+
+            if [ "$FOUND" -eq 0 ]; then
+              break
+            fi
+          done
+
+          echo "===== Final extracted tree ====="
+          find extracted -maxdepth 15 -print
+
+      # ---------------------------------------------------------
+      # 5. Find Xcode project/workspace
+      # ---------------------------------------------------------
+      - name: Find Xcode project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT="$(find extracted \
+            -type d \
+            -name "*.xcodeproj" \
+            -print -quit)"
+
+          WORKSPACE="$(find extracted \
+            -type d \
+            -name "*.xcworkspace" \
+            -print -quit)"
 
           if [ -n "$WORKSPACE" ]; then
             echo "TYPE=workspace" >> "$GITHUB_ENV"
             echo "XCODE_PATH=$WORKSPACE" >> "$GITHUB_ENV"
-            echo "Found workspace: $WORKSPACE"
+
+            echo "================================"
+            echo "Found Xcode workspace:"
+            echo "$WORKSPACE"
+            echo "================================"
 
           elif [ -n "$PROJECT" ]; then
             echo "TYPE=project" >> "$GITHUB_ENV"
             echo "XCODE_PATH=$PROJECT" >> "$GITHUB_ENV"
-            echo "Found project: $PROJECT"
+
+            echo "================================"
+            echo "Found Xcode project:"
+            echo "$PROJECT"
+            echo "================================"
 
           else
-            echo "❌ No .xcodeproj or .xcworkspace found!"
+            echo "::error::No .xcodeproj or .xcworkspace was found inside test.zip."
+
+            echo ""
+            echo "===== Everything extracted ====="
+            find extracted -maxdepth 20 -print
+
+            echo ""
+            echo "If this contains an IPA, APP, source folder, or another archive,"
+            echo "it cannot be built with xcodebuild until an Xcode project/workspace exists."
+
             exit 1
           fi
 
-      - name: Find scheme
+      # ---------------------------------------------------------
+      # 6. List schemes
+      # ---------------------------------------------------------
+      - name: List Xcode schemes
+        shell: bash
         run: |
+          set -e
+
           if [ "$TYPE" = "workspace" ]; then
-            xcodebuild -list -workspace "$XCODE_PATH" > xcode-list.txt
+            xcodebuild \
+              -list \
+              -workspace "$XCODE_PATH" \
+              | tee xcode-list.txt
           else
-            xcodebuild -list -project "$XCODE_PATH" > xcode-list.txt
+            xcodebuild \
+              -list \
+              -project "$XCODE_PATH" \
+              | tee xcode-list.txt
           fi
 
-          cat xcode-list.txt
+      # ---------------------------------------------------------
+      # 7. Select scheme
+      # ---------------------------------------------------------
+      - name: Select scheme
+        shell: bash
+        run: |
+          set -e
 
-          SCHEME=$(sed -n '/Schemes:/,/^$/p' xcode-list.txt \
-            | tail -n +2 \
-            | sed 's/^[[:space:]]*//' \
-            | grep -v '^$' \
-            | head -n 1)
+          SCHEME="$(
+            awk '
+              /Schemes:/ {
+                found=1
+                next
+              }
+
+              found && NF {
+                gsub(/^[ \t]+|[ \t]+$/, "")
+                print
+                exit
+              }
+            ' xcode-list.txt
+          )"
 
           if [ -z "$SCHEME" ]; then
-            echo "❌ Could not find scheme!"
+            echo "::error::No Xcode scheme was found."
+
+            echo ""
+            echo "===== xcodebuild -list output ====="
+            cat xcode-list.txt
+
             exit 1
           fi
 
           echo "SCHEME=$SCHEME" >> "$GITHUB_ENV"
-          echo "Using scheme: $SCHEME"
 
+          echo "Selected scheme:"
+          echo "$SCHEME"
+
+      # ---------------------------------------------------------
+      # 8. Build unsigned .app
+      # ---------------------------------------------------------
       - name: Build unsigned app
+        shell: bash
         run: |
+          set -e
+
           rm -rf build
 
+          COMMON_ARGS=(
+            -scheme "$SCHEME"
+            -configuration Release
+            -sdk iphoneos
+            -destination "generic/platform=iOS"
+            -derivedDataPath "$GITHUB_WORKSPACE/build"
+            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_REQUIRED=NO
+            CODE_SIGN_IDENTITY=""
+          )
+
           if [ "$TYPE" = "workspace" ]; then
+
             xcodebuild \
               -workspace "$XCODE_PATH" \
-              -scheme "$SCHEME" \
-              -configuration Release \
-              -sdk iphoneos \
-              -destination "generic/platform=iOS" \
-              -derivedDataPath build \
-              CODE_SIGNING_ALLOWED=NO \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGN_IDENTITY=""
+              "${COMMON_ARGS[@]}"
+
           else
+
             xcodebuild \
               -project "$XCODE_PATH" \
-              -scheme "$SCHEME" \
-              -configuration Release \
-              -sdk iphoneos \
-              -destination "generic/platform=iOS" \
-              -derivedDataPath build \
-              CODE_SIGNING_ALLOWED=NO \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGN_IDENTITY=""
+              "${COMMON_ARGS[@]}"
+
           fi
 
-      - name: Find .app
+      # ---------------------------------------------------------
+      # 9. Find generated .app
+      # ---------------------------------------------------------
+      - name: Find built app
+        shell: bash
         run: |
-          APP=$(find build/Build/Products/Release-iphoneos \
-            -maxdepth 1 \
-            -type d \
-            -name "*.app" \
-            | head -n 1)
+          set -e
+
+          APP="$(
+            find build \
+              -type d \
+              -name "*.app" \
+              -path "*Release-iphoneos*" \
+              -print -quit
+          )"
 
           if [ -z "$APP" ]; then
-            echo "❌ No .app found!"
-            find build -type d -name "*.app"
+            echo "::error::The Xcode build completed but no .app was found."
+
+            echo ""
+            echo "===== Build products ====="
+            find build -maxdepth 10 -print
+
             exit 1
           fi
 
           echo "APP=$APP" >> "$GITHUB_ENV"
-          echo "Found app: $APP"
 
+          echo "================================"
+          echo "Built app:"
+          echo "$APP"
+          echo "================================"
+
+      # ---------------------------------------------------------
+      # 10. Create IPA
+      # ---------------------------------------------------------
       - name: Create unsigned IPA
+        shell: bash
         run: |
+          set -e
+
           rm -rf ipa
           mkdir -p ipa/Payload
 
           cp -R "$APP" ipa/Payload/
 
           cd ipa
-          zip -r ../unsigned.ipa Payload
 
-          cd ..
+          zip -qry \
+            "$GITHUB_WORKSPACE/unsigned.ipa" \
+            Payload
 
-          echo "✅ Created unsigned.ipa"
+          cd "$GITHUB_WORKSPACE"
+
+          echo "================================"
+          echo "IPA created:"
           ls -lh unsigned.ipa
+          echo "================================"
 
-      - name: Upload IPA
+      # ---------------------------------------------------------
+      # 11. Upload IPA
+      # ---------------------------------------------------------
+      - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
           name: unsigned-ipa
           path: unsigned.ipa
           if-no-files-found: error
+
+      # ---------------------------------------------------------
+      # 12. Upload build logs if something goes wrong
+      # ---------------------------------------------------------
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: |
+            xcode-list.txt
+            build/
+          if-no-files-found: ignore
